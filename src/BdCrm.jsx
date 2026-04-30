@@ -21,6 +21,28 @@ const api = async (path, options = {}) => {
 const ACTIVITY_TYPES = ["Phone Call", "Email", "LinkedIn", "Meeting", "Seminar", "Direct Mail", "Referral Received"];
 const CONTACT_TYPES = ["Lawyer", "Barrister"];
 const FIRM_TYPES = ["Law Firm", "Barrister Chambers"];
+const AU_STATES = ["NSW", "VIC", "QLD", "WA", "SA", "TAS", "ACT", "NT"];
+
+const getMailingAddress = (c) => {
+  const hasOverride = c.mailing_line1 || c.mailing_suburb || c.mailing_postcode;
+  const src = hasOverride
+    ? { line1: c.mailing_line1, line2: c.mailing_line2, suburb: c.mailing_suburb, state: c.mailing_state, postcode: c.mailing_postcode }
+    : c.firm
+    ? { line1: c.firm.address_line1, line2: c.firm.address_line2, suburb: c.firm.suburb, state: c.firm.state, postcode: c.firm.postcode }
+    : null;
+  if (!src || !(src.line1 || src.suburb || src.postcode)) return null;
+  return { ...src, source: hasOverride ? "contact" : "firm" };
+};
+
+const formatAddressLines = (a) => {
+  if (!a) return [];
+  const lines = [];
+  if (a.line1) lines.push(a.line1);
+  if (a.line2) lines.push(a.line2);
+  const cityLine = [a.suburb, a.state, a.postcode].filter(Boolean).join(" ");
+  if (cityLine) lines.push(cityLine);
+  return lines;
+};
 
 const todayStr = () => new Date().toISOString().split("T")[0];
 const fmtDate = (d) =>
@@ -370,6 +392,29 @@ function ContactDetail({ contact: c, activities, onEdit, onDelete, onLog, onBack
               </div>
             ))}
           </div>
+          {(() => {
+            const addr = getMailingAddress(c);
+            const lines = formatAddressLines(addr);
+            return (
+              <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 16, marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14, color: "#374151" }}>Mailing Address</div>
+                  {addr && (
+                    <span style={{ background: addr.source === "contact" ? "#fef3c7" : "#e0e7ff", color: addr.source === "contact" ? "#92400e" : "#3730a3", borderRadius: 99, padding: "2px 8px", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                      {addr.source === "contact" ? "Contact override" : "From firm"}
+                    </span>
+                  )}
+                </div>
+                {lines.length === 0 ? (
+                  <div style={{ fontSize: 13, color: "#94a3b8" }}>No address on file.</div>
+                ) : (
+                  <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.5 }}>
+                    {lines.map((l, i) => <div key={i}>{l}</div>)}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {c.tags?.length > 0 && (
             <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 16, marginBottom: 12 }}>
               <div style={{ fontWeight: 600, fontSize: 14, color: "#374151", marginBottom: 8 }}>Tags</div>
@@ -482,9 +527,15 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
     { key: "phone", label: "Phone" },
     { key: "linkedin_url", label: "LinkedIn URL" },
     { key: "firm_name", label: "Firm Name" },
+    { key: "address_line1", label: "Firm Address Line 1" },
+    { key: "address_line2", label: "Firm Address Line 2" },
+    { key: "suburb", label: "Firm Suburb" },
+    { key: "state", label: "Firm State" },
+    { key: "postcode", label: "Firm Postcode" },
     { key: "notes", label: "Notes" },
     { key: "_skip", label: "(Skip)" },
   ];
+  const FIRM_ADDR_FIELDS = ["address_line1", "address_line2", "suburb", "state", "postcode"];
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -507,6 +558,11 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
         else if (l.includes("phone") || l.includes("mobile")) auto[i] = "phone";
         else if (l.includes("linkedin")) auto[i] = "linkedin_url";
         else if (l.includes("firm") || l.includes("company") || l.includes("org")) auto[i] = "firm_name";
+        else if (l.includes("postcode") || l.includes("postalcode") || l === "zip") auto[i] = "postcode";
+        else if (l === "state" || l.includes("state")) auto[i] = "state";
+        else if (l.includes("suburb") || l === "city" || l === "town") auto[i] = "suburb";
+        else if (l.includes("address2") || l.includes("addressline2") || l === "line2") auto[i] = "address_line2";
+        else if (l.includes("address") || l === "street" || l === "line1") auto[i] = "address_line1";
         else if (l.includes("note")) auto[i] = "notes";
         else auto[i] = "_skip";
       });
@@ -528,7 +584,10 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
     const existing = await api("crm_contacts?select=email");
     const existingEmails = new Set(existing.map((e) => e.email?.toLowerCase()).filter(Boolean));
     const firmCache = {};
-    firms.forEach((f) => { firmCache[f.name.toLowerCase()] = f.id; });
+    firms.forEach((f) => {
+      const hasAddr = !!(f.address_line1 || f.suburb || f.postcode);
+      firmCache[f.name.toLowerCase()] = { id: f.id, hasAddr };
+    });
 
     for (const row of rows) {
       const obj = {};
@@ -536,16 +595,25 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
       if (!obj.first_name || !obj.last_name) { errors++; continue; }
       if (obj.email && existingEmails.has(obj.email.toLowerCase())) { dupes++; continue; }
       try {
+        const rowAddr = {};
+        FIRM_ADDR_FIELDS.forEach((k) => { if (obj[k]) rowAddr[k] = obj[k]; });
+        const hasRowAddr = Object.keys(rowAddr).length > 0;
         let firm_id = null;
         if (obj.firm_name) {
           const fk = obj.firm_name.toLowerCase();
-          if (firmCache[fk]) firm_id = firmCache[fk];
-          else {
-            const [nf] = await api("crm_firms", { method: "POST", body: JSON.stringify({ name: obj.firm_name, type: "Law Firm" }) });
-            firmCache[fk] = nf.id; firm_id = nf.id;
+          if (firmCache[fk]) {
+            firm_id = firmCache[fk].id;
+            if (hasRowAddr && !firmCache[fk].hasAddr) {
+              await api(`crm_firms?id=eq.${firm_id}`, { method: "PATCH", body: JSON.stringify(rowAddr) });
+              firmCache[fk].hasAddr = true;
+            }
+          } else {
+            const [nf] = await api("crm_firms", { method: "POST", body: JSON.stringify({ name: obj.firm_name, type: "Law Firm", ...rowAddr }) });
+            firmCache[fk] = { id: nf.id, hasAddr: hasRowAddr };
+            firm_id = nf.id;
           }
         }
-        const { firm_name, ...cd } = obj;
+        const { firm_name, address_line1, address_line2, suburb, state, postcode, ...cd } = obj;
         const [nc] = await api("crm_contacts", { method: "POST", body: JSON.stringify({ ...cd, type: batchType, firm_id }) });
         if (batchTags.length > 0) {
           await api("crm_contact_tags", { method: "POST", body: JSON.stringify(batchTags.map((t) => ({ contact_id: nc.id, tag_id: t.id }))) });
@@ -717,13 +785,18 @@ function SettingsPage({ tags, onRefresh }) {
 // ---- Modals ----
 
 function ContactModal({ contact, firms, tags, onCreateTag, onSave, onClose }) {
-  const [form, setForm] = useState(contact || { type: "Lawyer", first_name: "", last_name: "", email: "", phone: "", linkedin_url: "", firm_id: "", notes: "" });
+  const [form, setForm] = useState(contact || { type: "Lawyer", first_name: "", last_name: "", email: "", phone: "", linkedin_url: "", firm_id: "", notes: "", mailing_line1: "", mailing_line2: "", mailing_suburb: "", mailing_state: "", mailing_postcode: "" });
   const [selTags, setSelTags] = useState(contact?.tags || []);
   const [saving, setSaving] = useState(false);
+  const [showMailing, setShowMailing] = useState(!!(contact?.mailing_line1 || contact?.mailing_suburb || contact?.mailing_postcode));
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const handleSave = async () => {
     if (!form.first_name || !form.last_name) return alert("First and last name are required.");
     setSaving(true); await onSave({ ...form, tags: selTags }); setSaving(false);
+  };
+  const clearMailing = () => {
+    setForm((f) => ({ ...f, mailing_line1: "", mailing_line2: "", mailing_suburb: "", mailing_state: "", mailing_postcode: "" }));
+    setShowMailing(false);
   };
   return (
     <Modal title={contact ? "Edit Contact" : "Add Contact"} onClose={onClose}>
@@ -745,6 +818,30 @@ function ContactModal({ contact, firms, tags, onCreateTag, onSave, onClose }) {
         <Field label="Phone"><input value={form.phone || ""} onChange={(e) => set("phone", e.target.value)} style={inputStyle} /></Field>
       </div>
       <Field label="LinkedIn URL"><input value={form.linkedin_url || ""} onChange={(e) => set("linkedin_url", e.target.value)} style={inputStyle} /></Field>
+      {!showMailing ? (
+        <button type="button" onClick={() => setShowMailing(true)} style={{ background: "none", border: "1px dashed #cbd5e1", borderRadius: 6, padding: "8px 12px", color: "#64748b", fontSize: 12, cursor: "pointer", marginBottom: 12, width: "100%" }}>
+          + Add alternate mailing address (overrides firm address)
+        </button>
+      ) : (
+        <div style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "10px 12px 2px", marginBottom: 12, background: "#f8fafc" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4 }}>Alternate Mailing Address</span>
+            <button type="button" onClick={clearMailing} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>Clear</button>
+          </div>
+          <Field label="Address Line 1"><input value={form.mailing_line1 || ""} onChange={(e) => set("mailing_line1", e.target.value)} style={inputStyle} /></Field>
+          <Field label="Address Line 2"><input value={form.mailing_line2 || ""} onChange={(e) => set("mailing_line2", e.target.value)} style={inputStyle} /></Field>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12 }}>
+            <Field label="Suburb"><input value={form.mailing_suburb || ""} onChange={(e) => set("mailing_suburb", e.target.value)} style={inputStyle} /></Field>
+            <Field label="State">
+              <select value={form.mailing_state || ""} onChange={(e) => set("mailing_state", e.target.value)} style={inputStyle}>
+                <option value="">—</option>
+                {AU_STATES.map((s) => <option key={s}>{s}</option>)}
+              </select>
+            </Field>
+            <Field label="Postcode"><input value={form.mailing_postcode || ""} onChange={(e) => set("mailing_postcode", e.target.value)} maxLength={4} style={inputStyle} /></Field>
+          </div>
+        </div>
+      )}
       <Field label="Tags"><TagInput value={selTags} onChange={setSelTags} allTags={tags} onCreateTag={onCreateTag} /></Field>
       <Field label="Notes"><textarea value={form.notes || ""} onChange={(e) => set("notes", e.target.value)} rows={3} style={{ ...inputStyle, resize: "vertical" }} /></Field>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
@@ -794,11 +891,11 @@ function ActivityModal({ contacts, initialContactId, onSave, onClose }) {
 }
 
 function FirmModal({ firm, onSave, onClose }) {
-  const [form, setForm] = useState(firm || { name: "", type: "Law Firm", address: "", phone: "", website: "", notes: "" });
+  const [form, setForm] = useState(firm || { name: "", type: "Law Firm", address_line1: "", address_line2: "", suburb: "", state: "", postcode: "", phone: "", website: "", notes: "" });
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   return (
-    <Modal title={firm ? "Edit Firm" : "Add Firm"} onClose={onClose}>
+    <Modal title={firm ? "Edit Firm" : "Add Firm"} onClose={onClose} width={620}>
       <Field label="Firm Name *"><input value={form.name} onChange={(e) => set("name", e.target.value)} style={inputStyle} /></Field>
       <Field label="Type">
         <select value={form.type} onChange={(e) => set("type", e.target.value)} style={inputStyle}>
@@ -809,7 +906,19 @@ function FirmModal({ firm, onSave, onClose }) {
         <Field label="Phone"><input value={form.phone || ""} onChange={(e) => set("phone", e.target.value)} style={inputStyle} /></Field>
         <Field label="Website"><input value={form.website || ""} onChange={(e) => set("website", e.target.value)} style={inputStyle} /></Field>
       </div>
-      <Field label="Address"><textarea value={form.address || ""} onChange={(e) => set("address", e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical" }} /></Field>
+      <div style={{ fontSize: 12, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, margin: "8px 0 6px" }}>Mailing Address</div>
+      <Field label="Address Line 1"><input value={form.address_line1 || ""} onChange={(e) => set("address_line1", e.target.value)} placeholder="Level 12, 123 Smith Street" style={inputStyle} /></Field>
+      <Field label="Address Line 2"><input value={form.address_line2 || ""} onChange={(e) => set("address_line2", e.target.value)} placeholder="Suite / PO Box (optional)" style={inputStyle} /></Field>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12 }}>
+        <Field label="Suburb"><input value={form.suburb || ""} onChange={(e) => set("suburb", e.target.value)} style={inputStyle} /></Field>
+        <Field label="State">
+          <select value={form.state || ""} onChange={(e) => set("state", e.target.value)} style={inputStyle}>
+            <option value="">—</option>
+            {AU_STATES.map((s) => <option key={s}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Postcode"><input value={form.postcode || ""} onChange={(e) => set("postcode", e.target.value)} maxLength={4} style={inputStyle} /></Field>
+      </div>
       <Field label="Notes"><textarea value={form.notes || ""} onChange={(e) => set("notes", e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical" }} /></Field>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
         <button onClick={onClose} style={{ padding: "8px 16px", background: "white", border: "1px solid #d1d5db", borderRadius: 6, cursor: "pointer" }}>Cancel</button>
@@ -844,7 +953,7 @@ export default function BDCRM() {
     try {
       setLoading(true);
       const [c, f, t, a] = await Promise.all([
-        api("crm_contacts?select=*,crm_firms(id,name,type),crm_contact_tags(crm_tags(id,name))&order=last_name.asc,first_name.asc"),
+        api("crm_contacts?select=*,crm_firms(id,name,type,address_line1,address_line2,suburb,state,postcode),crm_contact_tags(crm_tags(id,name))&order=last_name.asc,first_name.asc"),
         api("crm_firms?select=*&order=name.asc"),
         api("crm_tags?select=*&order=name.asc"),
         api("crm_activities?select=*&order=date.desc,created_at.desc"),
@@ -947,7 +1056,7 @@ export default function BDCRM() {
       <main style={{ flex: 1, overflow: "auto", padding: 24 }}>
         {error && (
           <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: "12px 16px", marginBottom: 16, color: "#991b1b", fontSize: 13 }}>
-            ⚠️ <strong>Database error:</strong> {error} — Please run the SQL schema in your Supabase SQL Editor first.
+            ⚠️ <strong>Database error:</strong> {error}
           </div>
         )}
         {loading ? (

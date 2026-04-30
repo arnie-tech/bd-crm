@@ -581,6 +581,7 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
   const doImport = async () => {
     setImporting(true);
     let imported = 0, dupes = 0, errors = 0;
+    let firstError = null;
     const existing = await api("crm_contacts?select=email");
     const existingEmails = new Set(existing.map((e) => e.email?.toLowerCase()).filter(Boolean));
     const firmCache = {};
@@ -589,10 +590,15 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
       firmCache[f.name.toLowerCase()] = { id: f.id, hasAddr };
     });
 
-    for (const row of rows) {
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const row = rows[rowIdx];
       const obj = {};
       hdrs.forEach((h, i) => { const f = mapping[i]; if (f && f !== "_skip") obj[f] = row[i] ? String(row[i]).trim() : ""; });
-      if (!obj.first_name || !obj.last_name) { errors++; continue; }
+      if (!obj.first_name || !obj.last_name) {
+        errors++;
+        if (!firstError) firstError = `Row ${rowIdx + 2}: missing first or last name`;
+        continue;
+      }
       if (obj.email && existingEmails.has(obj.email.toLowerCase())) { dupes++; continue; }
       try {
         const rowAddr = {};
@@ -620,9 +626,14 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
         }
         if (obj.email) existingEmails.add(obj.email.toLowerCase());
         imported++;
-      } catch (e) { errors++; }
+      } catch (e) {
+        errors++;
+        const msg = (e && e.message) ? e.message : String(e);
+        console.error(`Import row ${rowIdx + 2} failed:`, msg, obj);
+        if (!firstError) firstError = `Row ${rowIdx + 2}: ${msg}`;
+      }
     }
-    setResult({ imported, dupes, errors });
+    setResult({ imported, dupes, errors, firstError });
     setStep(4);
     setImporting(false);
     onImportComplete();
@@ -721,9 +732,9 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
 
       {step === 4 && result && (
         <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 40, textAlign: "center" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>{result.imported > 0 ? "✅" : "⚠️"}</div>
           <div style={{ fontSize: 20, fontWeight: 700, color: "#374151", marginBottom: 20 }}>Import Complete</div>
-          <div style={{ display: "flex", gap: 16, justifyContent: "center", marginBottom: 28 }}>
+          <div style={{ display: "flex", gap: 16, justifyContent: "center", marginBottom: 20 }}>
             {[["Imported", result.imported, "#16a34a", "#dcfce7"], ["Duplicates Skipped", result.dupes, "#d97706", "#fef9c3"], ["Errors", result.errors, "#dc2626", "#fee2e2"]].map(([l, v, c, bg]) => (
               <div key={l} style={{ background: bg, borderRadius: 8, padding: "14px 24px", minWidth: 110 }}>
                 <div style={{ fontSize: 28, fontWeight: 700, color: c }}>{v}</div>
@@ -731,6 +742,12 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
               </div>
             ))}
           </div>
+          {result.firstError && (
+            <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 24, color: "#991b1b", fontSize: 12, textAlign: "left", whiteSpace: "pre-wrap", maxWidth: 720, marginLeft: "auto", marginRight: "auto" }}>
+              <strong>First error:</strong> {result.firstError}
+              <div style={{ color: "#7f1d1d", marginTop: 6, fontSize: 11 }}>Open the browser console (F12) for full per-row details.</div>
+            </div>
+          )}
           <button
             onClick={() => { setStep(1); setRows([]); setHdrs([]); setMapping({}); setBatchTags([]); setResult(null); }}
             style={{ padding: "9px 24px", background: "#2d7dd2", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}

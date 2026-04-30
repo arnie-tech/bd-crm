@@ -44,6 +44,24 @@ const formatAddressLines = (a) => {
   return lines;
 };
 
+const csvEscape = (v) => {
+  const s = v == null ? "" : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const toCsv = (rows) => {
+  if (rows.length === 0) return "";
+  const cols = Object.keys(rows[0]);
+  return [cols.join(","), ...rows.map((r) => cols.map((k) => csvEscape(r[k])).join(","))].join("\r\n");
+};
+const downloadCsv = (content, filename) => {
+  const blob = new Blob(["﻿" + content], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 const todayStr = () => new Date().toISOString().split("T")[0];
 const fmtDate = (d) =>
   d ? new Date(d + "T00:00:00").toLocaleDateString("en-AU", { day: "2-digit", month: "short", year: "numeric" }) : "—";
@@ -805,7 +823,295 @@ function SettingsPage({ tags, onRefresh }) {
   );
 }
 
+// ---- Mailing Lists ----
+
+function ListsPage({ lists, onOpen, onAdd, onEdit, onDelete }) {
+  const [search, setSearch] = useState("");
+  const filtered = lists.filter((l) => l.name.toLowerCase().includes(search.toLowerCase()));
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "#1e3a5f", margin: 0 }}>Mailing Lists ({lists.length})</h1>
+        <button onClick={onAdd} style={{ padding: "8px 18px", background: "#2d7dd2", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
+          + New List
+        </button>
+      </div>
+      <input placeholder="Search lists..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, marginBottom: 10 }} />
+      {filtered.length === 0 ? (
+        <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 48, textAlign: "center", color: "#94a3b8", fontSize: 14 }}>
+          {lists.length === 0 ? "No lists yet. Create one to get started." : "No lists match your search."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {filtered.map((l) => (
+            <div key={l.id} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ flex: 1, cursor: "pointer" }} onClick={() => onOpen(l)}>
+                <div style={{ fontWeight: 600, color: "#1e3a5f", fontSize: 14 }}>{l.name}</div>
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                  {(l.members || []).length} contact{(l.members || []).length !== 1 ? "s" : ""}
+                  {l.description ? ` · ${l.description}` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => onOpen(l)} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 14px", cursor: "pointer", fontSize: 12, color: "#374151" }}>Open</button>
+                <button onClick={() => onEdit(l)} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 14px", cursor: "pointer", fontSize: 12, color: "#374151" }}>Edit</button>
+                <button onClick={() => onDelete(l)} style={{ background: "white", border: "1px solid #fca5a5", borderRadius: 6, padding: "5px 14px", cursor: "pointer", fontSize: 12, color: "#ef4444" }}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ListDetail({ list, contacts, onBack, onAddContacts, onRemoveMember, onEdit, onDelete }) {
+  const memberIds = new Set((list.members || []).map((m) => m.contact_id));
+  const members = contacts.filter((c) => memberIds.has(c.id));
+  const withAddress = members.filter((c) => getMailingAddress(c) !== null);
+  const withoutAddress = members.length - withAddress.length;
+
+  const handleDownload = () => {
+    if (withAddress.length === 0) {
+      alert(`No contacts have a mailing address on file. ${withoutAddress} contact${withoutAddress !== 1 ? "s" : ""} on this list cannot be exported.`);
+      return;
+    }
+    if (withoutAddress > 0) {
+      const ok = confirm(`${withAddress.length} will be exported. ${withoutAddress} excluded — no address on file.\n\nContinue?`);
+      if (!ok) return;
+    }
+    const rows = withAddress.map((c) => {
+      const a = getMailingAddress(c);
+      return {
+        "First Name": c.first_name || "",
+        "Last Name": c.last_name || "",
+        "Title": c.type || "",
+        "Firm": c.firm?.name || "",
+        "Line 1": a.line1 || "",
+        "Line 2": a.line2 || "",
+        "Suburb": a.suburb || "",
+        "State": a.state || "",
+        "Postcode": a.postcode || "",
+      };
+    });
+    const safeName = list.name.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "list";
+    downloadCsv(toCsv(rows), `${safeName}.csv`);
+  };
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b", fontSize: 13, marginBottom: 12, padding: 0 }}>
+        ← Back to Lists
+      </button>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: "#1e3a5f", margin: 0 }}>{list.name}</h1>
+          {list.description && <div style={{ color: "#64748b", fontSize: 14, marginTop: 4 }}>{list.description}</div>}
+          <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
+            {members.length} contact{members.length !== 1 ? "s" : ""}
+            {withoutAddress > 0 && <span style={{ color: "#d97706" }}> · {withoutAddress} without address</span>}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onAddContacts} style={{ padding: "8px 16px", background: "#2d7dd2", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: 13 }}>+ Add Contacts</button>
+          <button onClick={handleDownload} style={{ padding: "8px 16px", background: "#16a34a", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: 13 }}>⬇ Download CSV</button>
+          <button onClick={onEdit} style={{ padding: "8px 14px", background: "white", border: "1px solid #d1d5db", borderRadius: 6, cursor: "pointer", fontSize: 13 }}>Edit</button>
+          <button onClick={onDelete} style={{ padding: "8px 14px", background: "white", border: "1px solid #fca5a5", borderRadius: 6, cursor: "pointer", color: "#ef4444", fontSize: 13 }}>Delete</button>
+        </div>
+      </div>
+      <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              {["Name", "Type", "Firm", "Mailing Address", ""].map((h) => (
+                <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 12, fontWeight: 600, color: "#64748b", borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {members.length === 0 ? (
+              <tr><td colSpan={5} style={{ padding: 32, textAlign: "center", color: "#94a3b8", fontSize: 14 }}>No contacts on this list yet. Click "Add Contacts" to build it.</td></tr>
+            ) : (
+              members.map((c) => {
+                const a = getMailingAddress(c);
+                const lines = formatAddressLines(a);
+                return (
+                  <tr key={c.id} style={{ borderTop: "1px solid #f1f5f9" }}>
+                    <td style={{ padding: "10px 12px", fontWeight: 600, color: "#1e3a5f", fontSize: 14 }}>{c.first_name} {c.last_name}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 13, color: "#64748b" }}>{c.type}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 13, color: "#64748b" }}>{c.firm?.name || "—"}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: lines.length === 0 ? "#d97706" : "#374151" }}>
+                      {lines.length === 0 ? "⚠ No address" : lines.join(", ")}
+                    </td>
+                    <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                      <button onClick={() => onRemoveMember(c.id)} style={{ background: "none", border: "1px solid #fca5a5", borderRadius: 4, padding: "3px 10px", cursor: "pointer", fontSize: 12, color: "#ef4444" }}>Remove</button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ListBuilder({ list, contacts, firms, tags, onBack, onAdd }) {
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("All");
+  const [tagFilter, setTagFilter] = useState("");
+  const [firmFilter, setFirmFilter] = useState("");
+  const [stateFilter, setStateFilter] = useState("");
+  const [requireAddress, setRequireAddress] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [saving, setSaving] = useState(false);
+
+  const existingMemberIds = new Set((list.members || []).map((m) => m.contact_id));
+
+  const filtered = contacts.filter((c) => {
+    if (existingMemberIds.has(c.id)) return false;
+    const s = search.toLowerCase();
+    if (s && !`${c.first_name} ${c.last_name} ${c.email || ""} ${c.firm?.name || ""}`.toLowerCase().includes(s)) return false;
+    if (typeFilter !== "All" && c.type !== typeFilter) return false;
+    if (tagFilter && !c.tags?.some((t) => t.id === tagFilter)) return false;
+    if (firmFilter && c.firm_id !== firmFilter) return false;
+    if (stateFilter) {
+      const a = getMailingAddress(c);
+      if (!a || a.state !== stateFilter) return false;
+    }
+    if (requireAddress && !getMailingAddress(c)) return false;
+    return true;
+  });
+
+  const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.id));
+  const toggleAll = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) filtered.forEach((c) => next.delete(c.id));
+      else filtered.forEach((c) => next.add(c.id));
+      return next;
+    });
+  };
+  const toggleOne = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const handleAdd = async () => {
+    if (selected.size === 0) return;
+    setSaving(true);
+    await onAdd(Array.from(selected));
+    setSaving(false);
+  };
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b", fontSize: 13, marginBottom: 12, padding: 0 }}>
+        ← Back to {list.name}
+      </button>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#1e3a5f", margin: 0 }}>Add Contacts to "{list.name}"</h1>
+          <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
+            {filtered.length} available · {selected.size} selected · {existingMemberIds.size} already on list
+          </div>
+        </div>
+        <button
+          onClick={handleAdd}
+          disabled={selected.size === 0 || saving}
+          style={{ padding: "8px 22px", background: selected.size === 0 || saving ? "#94a3b8" : "#16a34a", color: "white", border: "none", borderRadius: 6, cursor: selected.size === 0 || saving ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13 }}
+        >
+          {saving ? "Adding…" : `Add ${selected.size} to list`}
+        </button>
+      </div>
+      <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 10, marginBottom: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input placeholder="Search name, email, firm..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: 1, minWidth: 180, padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, outline: "none" }} />
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13 }}>
+          {["All", ...CONTACT_TYPES].map((o) => <option key={o}>{o}</option>)}
+        </select>
+        <select value={firmFilter} onChange={(e) => setFirmFilter(e.target.value)} style={{ padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13 }}>
+          <option value="">All Firms</option>
+          {firms.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+        <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} style={{ padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13 }}>
+          <option value="">All Tags</option>
+          {tags.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+        <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} style={{ padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13 }}>
+          <option value="">All States</option>
+          {AU_STATES.map((s) => <option key={s}>{s}</option>)}
+        </select>
+        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#374151", cursor: "pointer" }}>
+          <input type="checkbox" checked={requireAddress} onChange={(e) => setRequireAddress(e.target.checked)} />
+          Has address
+        </label>
+      </div>
+      <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ padding: "8px 12px", width: 32, background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={filtered.length === 0} />
+              </th>
+              {["Name", "Type", "Firm", "Address"].map((h) => (
+                <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 12, fontWeight: 600, color: "#64748b", borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr><td colSpan={5} style={{ padding: 32, textAlign: "center", color: "#94a3b8", fontSize: 14 }}>No contacts match these filters.</td></tr>
+            ) : (
+              filtered.map((c) => {
+                const a = getMailingAddress(c);
+                const summary = a ? [a.suburb, a.state, a.postcode].filter(Boolean).join(" ") : "";
+                return (
+                  <tr key={c.id} style={{ borderTop: "1px solid #f1f5f9", background: selected.has(c.id) ? "#eff6ff" : "transparent" }}>
+                    <td style={{ padding: "10px 12px" }}>
+                      <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleOne(c.id)} />
+                    </td>
+                    <td style={{ padding: "10px 12px", fontWeight: 600, color: "#1e3a5f", fontSize: 14 }}>{c.first_name} {c.last_name}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 13, color: "#64748b" }}>{c.type}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 13, color: "#64748b" }}>{c.firm?.name || "—"}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 12, color: a ? "#374151" : "#d97706" }}>{a ? summary || "✓" : "⚠ No address"}</td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ---- Modals ----
+
+function ListModal({ list, onSave, onClose }) {
+  const [form, setForm] = useState(list || { name: "", description: "" });
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const handleSave = async () => {
+    if (!form.name.trim()) return alert("List name is required.");
+    setSaving(true); await onSave(form); setSaving(false);
+  };
+  return (
+    <Modal title={list ? "Edit List" : "New Mailing List"} onClose={onClose}>
+      <Field label="Name *"><input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. April newsletter — VIC barristers" style={inputStyle} /></Field>
+      <Field label="Description"><textarea value={form.description || ""} onChange={(e) => set("description", e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical" }} /></Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+        <button onClick={onClose} style={{ padding: "8px 16px", background: "white", border: "1px solid #d1d5db", borderRadius: 6, cursor: "pointer" }}>Cancel</button>
+        <button onClick={handleSave} disabled={saving} style={{ padding: "8px 22px", background: "#2d7dd2", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
 
 function ContactModal({ contact, firms, tags, onCreateTag, onSave, onClose }) {
   const [form, setForm] = useState(contact || { type: "Lawyer", first_name: "", last_name: "", email: "", phone: "", linkedin_url: "", firm_id: "", notes: "", mailing_line1: "", mailing_line2: "", mailing_suburb: "", mailing_state: "", mailing_postcode: "" });
@@ -966,23 +1272,29 @@ export default function BDCRM() {
   const [firms, setFirms] = useState([]);
   const [tags, setTags] = useState([]);
   const [activities, setActivities] = useState([]);
+  const [lists, setLists] = useState([]);
+  const [selectedListId, setSelectedListId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [contactModal, setContactModal] = useState(null);
   const [activityModal, setActivityModal] = useState(null);
   const [firmModal, setFirmModal] = useState(null);
+  const [listModal, setListModal] = useState(null);
 
   const loadAll = useCallback(async ({ withSpinner = false } = {}) => {
     try {
       if (withSpinner) setLoading(true);
-      const [c, f, t, a] = await Promise.all([
+      const [c, f, t, a, l] = await Promise.all([
         api("crm_contacts?select=*,crm_firms(id,name,type,address_line1,address_line2,suburb,state,postcode),crm_contact_tags(crm_tags(id,name))&order=last_name.asc,first_name.asc"),
         api("crm_firms?select=*&order=name.asc"),
         api("crm_tags?select=*&order=name.asc"),
         api("crm_activities?select=*&order=date.desc,created_at.desc"),
+        api("crm_lists?select=*,crm_list_members(contact_id)&order=name.asc"),
       ]);
       setContacts(c.map((x) => ({ ...x, firm: x.crm_firms, tags: (x.crm_contact_tags || []).map((ct) => ct.crm_tags).filter(Boolean) })));
-      setFirms(f); setTags(t); setActivities(a); setError(null);
+      setFirms(f); setTags(t); setActivities(a);
+      setLists(l.map((x) => ({ ...x, members: x.crm_list_members || [] })));
+      setError(null);
     } catch (e) { setError(e.message); }
     finally { if (withSpinner) setLoading(false); }
   }, []);
@@ -1027,18 +1339,53 @@ export default function BDCRM() {
     await loadAll(); setActivityModal(null);
   };
 
+  const saveList = async (data) => {
+    const { id, members, crm_list_members, ...rest } = data;
+    if (id) {
+      await api(`crm_lists?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(rest) });
+    } else {
+      const [nl] = await api("crm_lists", { method: "POST", body: JSON.stringify(rest) });
+      setSelectedListId(nl.id);
+      setPage("list-detail");
+    }
+    await loadAll(); setListModal(null);
+  };
+
+  const deleteList = async (l) => {
+    if (!confirm(`Delete list "${l.name}"? Members are removed but contacts themselves stay.`)) return;
+    await api(`crm_lists?id=eq.${l.id}`, { method: "DELETE" });
+    if (selectedListId === l.id) { setSelectedListId(null); setPage("lists"); }
+    await loadAll();
+  };
+
+  const addContactsToList = async (listId, contactIds) => {
+    if (contactIds.length === 0) return;
+    const rows = contactIds.map((cid) => ({ list_id: listId, contact_id: cid }));
+    await api("crm_list_members", { method: "POST", body: JSON.stringify(rows) });
+    await loadAll();
+    setPage("list-detail");
+  };
+
+  const removeListMember = async (listId, contactId) => {
+    await api(`crm_list_members?list_id=eq.${listId}&contact_id=eq.${contactId}`, { method: "DELETE" });
+    await loadAll();
+  };
+
   const nav = (p, extra = {}) => {
     setPage(p);
     if (extra.contactId !== undefined) setSelectedContactId(extra.contactId);
+    if (extra.listId !== undefined) setSelectedListId(extra.listId);
   };
 
   const selectedContact = contacts.find((c) => c.id === selectedContactId);
   const contactActivities = activities.filter((a) => a.contact_id === selectedContactId);
+  const selectedList = lists.find((l) => l.id === selectedListId);
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "⊞" },
     { id: "contacts",  label: "Contacts",  icon: "👤" },
     { id: "firms",     label: "Firms",     icon: "🏢" },
+    { id: "lists",     label: "Lists",     icon: "✉️" },
     { id: "import",    label: "Import",    icon: "📥" },
     { id: "settings",  label: "Settings",  icon: "⚙️" },
   ];
@@ -1053,7 +1400,10 @@ export default function BDCRM() {
         </div>
         <div style={{ flex: 1 }}>
           {navItems.map((item) => {
-            const active = item.id === "contacts" ? page === "contacts" || page === "contact-detail" : page === item.id;
+            const active =
+              item.id === "contacts" ? page === "contacts" || page === "contact-detail" :
+              item.id === "lists" ? page === "lists" || page === "list-detail" || page === "list-build" :
+              page === item.id;
             return (
               <button
                 key={item.id}
@@ -1116,6 +1466,34 @@ export default function BDCRM() {
                 onSelectContact={(c) => nav("contact-detail", { contactId: c.id })}
               />
             )}
+            {page === "lists" && (
+              <ListsPage
+                lists={lists}
+                onOpen={(l) => nav("list-detail", { listId: l.id })}
+                onAdd={() => setListModal("new")}
+                onEdit={(l) => setListModal(l)}
+                onDelete={deleteList}
+              />
+            )}
+            {page === "list-detail" && selectedList && (
+              <ListDetail
+                list={selectedList}
+                contacts={contacts}
+                onBack={() => { setSelectedListId(null); setPage("lists"); }}
+                onAddContacts={() => setPage("list-build")}
+                onRemoveMember={(cid) => removeListMember(selectedList.id, cid)}
+                onEdit={() => setListModal(selectedList)}
+                onDelete={() => deleteList(selectedList)}
+              />
+            )}
+            {page === "list-build" && selectedList && (
+              <ListBuilder
+                list={selectedList}
+                contacts={contacts} firms={firms} tags={tags}
+                onBack={() => setPage("list-detail")}
+                onAdd={(ids) => addContactsToList(selectedList.id, ids)}
+              />
+            )}
             {page === "import" && (
               <ImportPage firms={firms} tags={tags} onCreateTag={createTag} onImportComplete={loadAll} />
             )}
@@ -1149,6 +1527,13 @@ export default function BDCRM() {
           firm={firmModal === "new" ? null : firmModal}
           onSave={saveFirm}
           onClose={() => setFirmModal(null)}
+        />
+      )}
+      {listModal && (
+        <ListModal
+          list={listModal === "new" ? null : listModal}
+          onSave={saveList}
+          onClose={() => setListModal(null)}
         />
       )}
     </div>

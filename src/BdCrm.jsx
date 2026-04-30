@@ -582,6 +582,7 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
     setImporting(true);
     let imported = 0, dupes = 0, errors = 0;
     let firstError = null;
+    try {
     const existing = await api("crm_contacts?select=email");
     const existingEmails = new Set(existing.map((e) => e.email?.toLowerCase()).filter(Boolean));
     const firmCache = {};
@@ -632,6 +633,11 @@ function ImportPage({ firms, tags, onCreateTag, onImportComplete }) {
         console.error(`Import row ${rowIdx + 2} failed:`, msg, obj);
         if (!firstError) firstError = `Row ${rowIdx + 2}: ${msg}`;
       }
+    }
+    } catch (e) {
+      const msg = (e && e.message) ? e.message : String(e);
+      console.error("Import aborted:", msg);
+      if (!firstError) firstError = `Aborted: ${msg}`;
     }
     setResult({ imported, dupes, errors, firstError });
     setStep(4);
@@ -966,9 +972,9 @@ export default function BDCRM() {
   const [activityModal, setActivityModal] = useState(null);
   const [firmModal, setFirmModal] = useState(null);
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async ({ withSpinner = false } = {}) => {
     try {
-      setLoading(true);
+      if (withSpinner) setLoading(true);
       const [c, f, t, a] = await Promise.all([
         api("crm_contacts?select=*,crm_firms(id,name,type,address_line1,address_line2,suburb,state,postcode),crm_contact_tags(crm_tags(id,name))&order=last_name.asc,first_name.asc"),
         api("crm_firms?select=*&order=name.asc"),
@@ -978,10 +984,10 @@ export default function BDCRM() {
       setContacts(c.map((x) => ({ ...x, firm: x.crm_firms, tags: (x.crm_contact_tags || []).map((ct) => ct.crm_tags).filter(Boolean) })));
       setFirms(f); setTags(t); setActivities(a); setError(null);
     } catch (e) { setError(e.message); }
-    finally { setLoading(false); }
+    finally { if (withSpinner) setLoading(false); }
   }, []);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => { loadAll({ withSpinner: true }); }, [loadAll]);
 
   const createTag = async (name) => {
     try {
